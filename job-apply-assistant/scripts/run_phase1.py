@@ -217,6 +217,7 @@ class DeliveryTask:
     job_id: str
     job_url: str
     company_name: str
+    title: str
     recruiter_info: str
     recommended_resume_version: str
     final_greeting_text: str
@@ -516,6 +517,7 @@ def build_delivery_task(job: JobPosting, match: MatchResult) -> DeliveryTask:
         job_id=job.job_id,
         job_url=job.url,
         company_name=job.company_name,
+        title=job.title,
         recruiter_info=job.recruiter_info,
         recommended_resume_version="base",
         final_greeting_text=match.recruiter_greeting,

@@ -4,6 +4,7 @@ __pycache__/
 chromedriver-win64/
 resume.pdf
 base简历.pdf
+output/
 job-apply-assistant/browser-profile/
 job-apply-assistant/output/
 job-apply-assistant/snapshots/

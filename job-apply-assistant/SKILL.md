@@ -171,7 +171,7 @@ Phase 2 can extend the same structure by:
 
 - selecting a resume variant
 - generating resume adaptation notes
-- handing confirmed delivery tasks to an execution layer
+- handing confirmed delivery tasks to an execution layer such as `scripts/execute_delivery_tasks.py`
 
 ## References
 

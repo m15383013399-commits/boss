@@ -8,7 +8,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -79,6 +79,14 @@ def build_job_id(platform: str, url: str, title: str, company_name: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
+def normalize_job_url(url: str, base_url: str = "https://www.zhipin.com/") -> str:
+    if not url:
+        return ""
+    absolute = urljoin(base_url, url)
+    parsed = urlparse(absolute)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
 def summarize_text(text: str) -> list[str]:
     chunks = []
     for raw in text.replace("；", "。").replace(";", "。").split("。"):
@@ -103,7 +111,7 @@ def parse_boss_html(html: str, source_url: str = "https://www.zhipin.com/") -> l
         experience_requirement = tag_items[0] if len(tag_items) >= 1 else ""
         education_requirement = tag_items[1] if len(tag_items) >= 2 else ""
         jd_text = ""
-        url = first_href(card, [".job-name", "a[href*='job_detail']"], source_url)
+        url = normalize_job_url(first_href(card, [".job-name", "a[href*='job_detail']"], source_url))
         if not title or not url:
             continue
         jobs.append(
@@ -372,110 +380,212 @@ def capture_with_browser(
         driver.quit()
 
 
-def collect_boss_jobs_live(
-    driver_path: str,
-    debugger_address: str,
-    browser_binary: str = "",
-    max_jobs: int = 15,
-    wait_seconds: float = 1.0,
-) -> list[NormalizedJob]:
+def attach_chrome_driver(driver_path: str, debugger_address: str, browser_binary: str = ""):
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options as ChromeOptions
     from selenium.webdriver.chrome.service import Service as ChromeService
-    from selenium.webdriver.common.by import By
 
     options = ChromeOptions()
     options.debugger_address = debugger_address
     if browser_binary:
         options.binary_location = browser_binary
     service = ChromeService(executable_path=driver_path) if driver_path else ChromeService()
-    driver = webdriver.Chrome(service=service, options=options)
-    try:
-        jobs: list[NormalizedJob] = []
-        cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
-        total = min(len(cards), max_jobs)
-        for index in range(total):
-            cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
-            card = cards[index]
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card)
-            time.sleep(0.3)
+    return webdriver.Chrome(service=service, options=options)
 
+
+def wait_for_boss_job_cards(driver, timeout: float = 20.0) -> None:
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    WebDriverWait(driver, timeout).until(
+        lambda current: len(current.find_elements(By.CSS_SELECTOR, "li.job-card-box")) > 0
+    )
+
+
+def get_boss_card_urls(driver) -> list[str]:
+    from selenium.webdriver.common.by import By
+
+    urls: list[str] = []
+    cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
+    for card in cards:
+        try:
             title_node = card.find_element(By.CSS_SELECTOR, ".job-name")
-            url = title_node.get_attribute("href") or ""
-            title = normalize_text(title_node.text)
-            salary = normalize_text(card.find_element(By.CSS_SELECTOR, ".job-salary").text)
-            tag_nodes = card.find_elements(By.CSS_SELECTOR, ".tag-list li")
-            tags = [normalize_text(node.text) for node in tag_nodes]
-            experience_requirement = tags[0] if len(tags) >= 1 else ""
-            education_requirement = tags[1] if len(tags) >= 2 else ""
-            company_name = normalize_text(card.find_element(By.CSS_SELECTOR, ".boss-name").text)
-            city = normalize_text(card.find_element(By.CSS_SELECTOR, ".company-location").text)
+            href = normalize_job_url(title_node.get_attribute("href") or "")
+            if href:
+                urls.append(href)
+        except Exception:
+            continue
+    return urls
 
-            driver.execute_script("arguments[0].click();", card)
-            time.sleep(wait_seconds)
 
-            detail_title = title
-            detail_salary = salary
-            detail_city = city
-            detail_exp = experience_requirement
-            detail_edu = education_requirement
+def wait_for_more_boss_cards(driver, before_urls: set[str], before_count: int, pause_seconds: float, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    poll_interval = max(0.4, min(pause_seconds, 1.5))
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        current_urls = set(get_boss_card_urls(driver))
+        current_count = len(current_urls)
+        if current_count > before_count or not current_urls.issubset(before_urls):
+            return True
+    return False
+
+
+def scroll_boss_job_list(driver, pause_seconds: float = 1.2, timeout: float = 8.0) -> bool:
+    from selenium.webdriver.common.by import By
+
+    cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
+    before_urls = set(get_boss_card_urls(driver))
+    before_count = len(before_urls)
+    if cards:
+        driver.execute_script("arguments[0].scrollIntoView({block: 'end'});", cards[-1])
+    driver.execute_script("window.scrollBy(0, Math.max(window.innerHeight, 900));")
+    return wait_for_more_boss_cards(driver, before_urls, before_count, pause_seconds=pause_seconds, timeout=timeout)
+
+
+def extract_boss_job_from_card(driver, card_index: int, wait_seconds: float = 1.0) -> NormalizedJob | None:
+    from selenium.webdriver.common.by import By
+
+    cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
+    if card_index >= len(cards):
+        return None
+    card = cards[card_index]
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card)
+    time.sleep(0.3)
+
+    title_node = card.find_element(By.CSS_SELECTOR, ".job-name")
+    url = normalize_job_url(title_node.get_attribute("href") or "")
+    title = normalize_text(title_node.text)
+    salary = normalize_text(card.find_element(By.CSS_SELECTOR, ".job-salary").text)
+    tag_nodes = card.find_elements(By.CSS_SELECTOR, ".tag-list li")
+    tags = [normalize_text(node.text) for node in tag_nodes]
+    experience_requirement = tags[0] if len(tags) >= 1 else ""
+    education_requirement = tags[1] if len(tags) >= 2 else ""
+    company_name = normalize_text(card.find_element(By.CSS_SELECTOR, ".boss-name").text)
+    city = normalize_text(card.find_element(By.CSS_SELECTOR, ".company-location").text)
+
+    driver.execute_script("arguments[0].click();", card)
+    time.sleep(wait_seconds)
+
+    detail_title = title
+    detail_salary = salary
+    detail_city = city
+    detail_exp = experience_requirement
+    detail_edu = education_requirement
+    detail_text = ""
+    detail_summary: list[str] = []
+    detail_requirements: list[str] = []
+    detail_bonus: list[str] = []
+
+    detail_boxes = driver.find_elements(By.CSS_SELECTOR, ".job-detail-box")
+    if detail_boxes:
+        detail_box = detail_boxes[0]
+        try:
+            node = detail_box.find_element(By.CSS_SELECTOR, ".job-detail-info .job-name")
+            detail_title = normalize_text(node.text) or detail_title
+        except Exception:
+            pass
+        try:
+            node = detail_box.find_element(By.CSS_SELECTOR, ".job-detail-info .job-salary")
+            detail_salary = normalize_text(node.text) or detail_salary
+        except Exception:
+            pass
+        try:
+            detail_tags = [
+                normalize_text(node.text)
+                for node in detail_box.find_elements(By.CSS_SELECTOR, ".job-detail-info .tag-list li")
+            ]
+            detail_city = detail_tags[0] if len(detail_tags) >= 1 else detail_city
+            detail_exp = detail_tags[1] if len(detail_tags) >= 2 else detail_exp
+            detail_edu = detail_tags[2] if len(detail_tags) >= 3 else detail_edu
+        except Exception:
+            pass
+        try:
+            desc = detail_box.find_element(By.CSS_SELECTOR, ".job-detail-body .desc")
+            detail_text = normalize_text(desc.text)
+        except Exception:
             detail_text = ""
-            detail_summary: list[str] = []
-            detail_requirements: list[str] = []
-            detail_bonus: list[str] = []
 
-            detail_boxes = driver.find_elements(By.CSS_SELECTOR, ".job-detail-box")
-            if detail_boxes:
-                detail_box = detail_boxes[0]
-                try:
-                    node = detail_box.find_element(By.CSS_SELECTOR, ".job-detail-info .job-name")
-                    detail_title = normalize_text(node.text) or detail_title
-                except Exception:
-                    pass
-                try:
-                    node = detail_box.find_element(By.CSS_SELECTOR, ".job-detail-info .job-salary")
-                    detail_salary = normalize_text(node.text) or detail_salary
-                except Exception:
-                    pass
-                try:
-                    detail_tags = [normalize_text(n.text) for n in detail_box.find_elements(By.CSS_SELECTOR, ".job-detail-info .tag-list li")]
-                    detail_city = detail_tags[0] if len(detail_tags) >= 1 else detail_city
-                    detail_exp = detail_tags[1] if len(detail_tags) >= 2 else detail_exp
-                    detail_edu = detail_tags[2] if len(detail_tags) >= 3 else detail_edu
-                except Exception:
-                    pass
-                try:
-                    desc = detail_box.find_element(By.CSS_SELECTOR, ".job-detail-body .desc")
-                    detail_text = normalize_text(desc.text)
-                except Exception:
-                    detail_text = ""
+        if detail_text:
+            detail_summary = summarize_text(detail_text)
+            detail_requirements = [
+                item for item in detail_summary if any(word in item for word in ["要求", "熟悉", "具备", "负责", "经验"])
+            ][:6]
+            detail_bonus = [item for item in detail_summary if any(word in item for word in ["优先", "加分"])]
 
-                if detail_text:
-                    detail_summary = summarize_text(detail_text)
-                    detail_requirements = [
-                        item for item in detail_summary if any(word in item for word in ["要求", "熟悉", "具备", "负责", "经验"])
-                    ][:6]
-                    detail_bonus = [item for item in detail_summary if any(word in item for word in ["优先", "加分"])]
+    return NormalizedJob(
+        platform="boss",
+        job_id=build_job_id("boss", url, detail_title or title, company_name),
+        url=url,
+        company_name=company_name,
+        company_info="",
+        recruiter_info="",
+        title=detail_title or title,
+        city=detail_city or city,
+        salary=detail_salary or salary,
+        experience_requirement=detail_exp or experience_requirement,
+        education_requirement=detail_edu or education_requirement,
+        jd_text=detail_text,
+        jd_summary=detail_summary,
+        requirements=detail_requirements,
+        bonus_items=detail_bonus,
+    )
 
-            jobs.append(
-                NormalizedJob(
-                    platform="boss",
-                    job_id=build_job_id("boss", url, detail_title or title, company_name),
-                    url=url,
-                    company_name=company_name,
-                    company_info="",
-                    recruiter_info="",
-                    title=detail_title or title,
-                    city=detail_city or city,
-                    salary=detail_salary or salary,
-                    experience_requirement=detail_exp or experience_requirement,
-                    education_requirement=detail_edu or education_requirement,
-                    jd_text=detail_text,
-                    jd_summary=detail_summary,
-                    requirements=detail_requirements,
-                    bonus_items=detail_bonus,
-                )
-            )
+
+def collect_boss_jobs_live(
+    driver_path: str,
+    debugger_address: str,
+    browser_binary: str = "",
+    max_jobs: int = 15,
+    wait_seconds: float = 1.0,
+    idle_rounds: int = 3,
+    scroll_pause: float = 1.2,
+    scroll_timeout: float = 8.0,
+) -> list[NormalizedJob]:
+    from selenium.webdriver.common.by import By
+
+    driver = attach_chrome_driver(driver_path=driver_path, debugger_address=debugger_address, browser_binary=browser_binary)
+    try:
+        wait_for_boss_job_cards(driver)
+        jobs: list[NormalizedJob] = []
+        processed_urls: set[str] = set()
+        idle_rounds_done = 0
+
+        while True:
+            cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
+            progress_made = False
+            for index in range(len(cards)):
+                cards = driver.find_elements(By.CSS_SELECTOR, "li.job-card-box")
+                if index >= len(cards):
+                    break
+                try:
+                    title_node = cards[index].find_element(By.CSS_SELECTOR, ".job-name")
+                    url = normalize_job_url(title_node.get_attribute("href") or "")
+                except Exception:
+                    continue
+                if not url or url in processed_urls:
+                    continue
+                job = extract_boss_job_from_card(driver, card_index=index, wait_seconds=wait_seconds)
+                processed_urls.add(url)
+                if job:
+                    jobs.append(job)
+                    progress_made = True
+                if max_jobs > 0 and len(jobs) >= max_jobs:
+                    return dedupe_jobs(jobs)
+
+            if progress_made:
+                idle_rounds_done = 0
+
+            if max_jobs > 0 and len(jobs) >= max_jobs:
+                break
+
+            loaded_more = scroll_boss_job_list(driver, pause_seconds=scroll_pause, timeout=scroll_timeout)
+            if loaded_more:
+                idle_rounds_done = 0
+                continue
+
+            idle_rounds_done += 1
+            if idle_rounds_done >= max(1, idle_rounds):
+                break
         return dedupe_jobs(jobs)
     finally:
         driver.quit()
@@ -530,12 +640,15 @@ def main() -> None:
     parser.add_argument("--session-launch", action="store_true", help="Launch a visible browser session with remote debugging and exit.")
     parser.add_argument("--live-extract", action="store_true", help="Use Selenium against the current browser page instead of parsing saved HTML.")
     parser.add_argument("--remote-debugging-port", type=int, default=9222, help="Remote debugging port for launch/attach flows.")
-    parser.add_argument("--max-jobs", type=int, default=15, help="Maximum number of jobs to collect in live browser mode.")
+    parser.add_argument("--max-jobs", type=int, default=15, help="Maximum number of jobs to collect in live browser mode. Use 0 to keep collecting until no new jobs appear.")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
     parser.add_argument("--user-data-dir", default="", help="Optional browser user data dir to reuse login state.")
     parser.add_argument("--profile-directory", default="", help="Optional Chrome/Edge profile directory name.")
     parser.add_argument("--manual-login", action="store_true", help="Pause after opening the first page for manual login.")
     parser.add_argument("--wait-seconds", type=float, default=3.0, help="Seconds to wait after page load in browser mode.")
+    parser.add_argument("--idle-rounds", type=int, default=3, help="Stop live extraction after this many scroll rounds without newly loaded jobs.")
+    parser.add_argument("--scroll-pause", type=float, default=1.2, help="Seconds to wait between bottom-scroll checks in live browser mode.")
+    parser.add_argument("--scroll-timeout", type=float, default=8.0, help="Maximum seconds to wait for newly loaded jobs after each bottom scroll.")
     parser.add_argument("--snapshot-dir", help="Optional directory to save browser-captured HTML snapshots.")
     parser.add_argument("--output", required=True, help="Path to normalized jobs JSON.")
     args = parser.parse_args()
@@ -579,6 +692,9 @@ def main() -> None:
             browser_binary=args.browser_binary,
             max_jobs=args.max_jobs,
             wait_seconds=args.wait_seconds,
+            idle_rounds=args.idle_rounds,
+            scroll_pause=args.scroll_pause,
+            scroll_timeout=args.scroll_timeout,
         )
         save_jobs(Path(args.output), jobs)
         print(f"Collected {len(jobs)} jobs into {Path(args.output).resolve()}")
