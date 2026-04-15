@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.selenium/
+chromedriver-win64/
+resume.pdf
+base简历.pdf
+job-apply-assistant/browser-profile/
+job-apply-assistant/output/
+job-apply-assistant/snapshots/
