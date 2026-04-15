@@ -1,0 +1,4 @@
+interface:
+  display_name: "Job Apply Assistant"
+  short_description: "Score target jobs and prepare recruiter outreach."
+  default_prompt: "Use $job-apply-assistant to score data product roles against my current resume and draft recruiter greetings."
