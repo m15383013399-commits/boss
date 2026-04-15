@@ -1,0 +1,19 @@
+{
+  "resume_source": "./resume.pdf",
+  "resume_patch": "",
+  "platforms": [
+    "boss",
+    "liepin"
+  ],
+  "job_keywords": [
+    "B端数据产品经理",
+    "大数据产品经理",
+    "数据中台",
+    "数仓"
+  ],
+  "exclude_keywords": [],
+  "city": "北京",
+  "salary_range": "20k-30k",
+  "greeting_style": "专业克制",
+  "match_threshold": 80
+}
