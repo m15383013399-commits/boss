@@ -1,0 +1,53 @@
+{
+  "jobs": [
+    {
+      "platform": "boss",
+      "job_id": "boss-001",
+      "url": "https://example.com/jobs/boss-001",
+      "company_name": "示例数据科技",
+      "company_info": "企业服务 / B轮 / 200-500人",
+      "recruiter_info": "招聘负责人",
+      "title": "数据产品经理",
+      "city": "北京",
+      "salary": "25k-30k",
+      "experience_requirement": "3-5年",
+      "education_requirement": "本科",
+      "jd_text": "负责数据中台产品规划与建设，推动指标体系和标签体系落地，协同研发和业务团队完成平台能力建设，要求具备 SQL、数仓、指标口径管理经验。",
+      "jd_summary": [
+        "负责数据中台产品规划与建设",
+        "推动指标体系和标签体系落地",
+        "要求具备 SQL、数仓、指标口径管理经验"
+      ],
+      "requirements": [
+        "3年以上数据产品经验",
+        "熟悉数仓和指标体系"
+      ],
+      "bonus_items": [
+        "有企业服务场景经验"
+      ]
+    },
+    {
+      "platform": "liepin",
+      "job_id": "liepin-002",
+      "url": "https://example.com/jobs/liepin-002",
+      "company_name": "示例商业分析公司",
+      "company_info": "咨询 / 1000人以上",
+      "recruiter_info": "HRBP",
+      "title": "商业分析师",
+      "city": "北京",
+      "salary": "18k-22k",
+      "experience_requirement": "3-5年",
+      "education_requirement": "本科",
+      "jd_text": "负责业务分析和经营分析，撰写周报月报，支持经营决策。",
+      "jd_summary": [
+        "负责业务分析和经营分析",
+        "撰写周报月报",
+        "支持经营决策"
+      ],
+      "requirements": [
+        "商业分析经验"
+      ],
+      "bonus_items": []
+    }
+  ]
+}
