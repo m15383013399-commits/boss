@@ -154,6 +154,14 @@ python "./job-apply-assistant/scripts/run_phase1.py" `
 生成 `boss-live-assessments.json` 后，可以直接读取其中的 `delivery_tasks`，
 自动在 Boss 网页端打开对应聊天，并把问候语填进去。
 
+执行层默认会走一套更保守的低风控策略：
+
+- 默认使用 `preserve_jobs_tab`，保留一个 Boss 列表页标签不动
+- 每条沟通任务在临时标签页里完成，避免频繁从聊天页再返回列表页
+- 每个关键动作之间都会加入随机停顿
+- 每条任务之间也会加入更长一点的冷却时间
+- 如果页面掉进 `browser-check` / `_security_check`，脚本会尽快停下来，不继续硬刷
+
 默认推荐先用 `draft` 模式，只填入 1 条，不发送：
 
 ```powershell
@@ -196,8 +204,11 @@ python "./job-apply-assistant/scripts/execute_delivery_tasks.py" `
 - `draft` 模式只会处理 1 条任务，并把内容留在聊天框里供你人工确认
 - `confirm` 模式会逐条填入消息，等你在浏览器里手动点发送；发送成功后脚本会自动切到下一条
 - `send` 模式会按当前筛出来的任务逐条进入聊天页并真实发送
+- 默认 `navigation-mode` 是 `preserve_jobs_tab`，更适合降低“聊天页返回列表页”带来的不稳定
 - `confirm` 模式下，如果你清空输入框而不是点击发送，脚本会把这一条视为跳过并继续后续任务
 - 这一步默认依赖你当前打开的 Boss 结果页；如果你有固定搜索 URL，也可以通过 `--jobs-url` 传入
+- 如果你想进一步放慢节奏，可以调大 `--action-pause-min/max` 和 `--between-task-pause-min/max`
+- 如果只是稳妥精投，建议 `confirm` 或 `send` 时单次先跑 `3-5` 条，不要长批量连续执行
 
 ## 安装为 Codex skill
 

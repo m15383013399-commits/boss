@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,6 +25,14 @@ class ExecutionResult:
     status: str
     note: str
     timestamp: float
+
+
+@dataclass(frozen=True)
+class ExecutionPacing:
+    action_pause_min: float
+    action_pause_max: float
+    between_task_pause_min: float
+    between_task_pause_max: float
 
 
 def read_json(path: Path) -> Any:
@@ -114,6 +123,99 @@ def safe_navigate(driver, url: str, timeout: float = 15.0) -> None:
             driver.execute_script("window.stop();")
         except Exception:
             pass
+
+
+def pause_for_human(min_seconds: float, max_seconds: float) -> None:
+    lower = max(0.0, min(min_seconds, max_seconds))
+    upper = max(lower, max(min_seconds, max_seconds))
+    if upper <= 0:
+        return
+    time.sleep(random.uniform(lower, upper))
+
+
+def wait_for_new_window(driver, existing_handles: set[str], timeout: float = 12.0) -> str:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            current_handles = driver.window_handles
+        except Exception:
+            current_handles = []
+        for handle in current_handles:
+            if handle not in existing_handles:
+                return handle
+        time.sleep(0.2)
+    raise RuntimeError("Timed out while waiting for a new browser tab.")
+
+
+def acquire_jobs_handle(driver, jobs_url: str) -> str:
+    current_handle = ""
+    try:
+        current_handle = driver.current_window_handle
+    except Exception:
+        pass
+
+    for handle in driver.window_handles:
+        try:
+            driver.switch_to.window(handle)
+        except Exception:
+            continue
+
+        current_url = ""
+        try:
+            current_url = driver.current_url
+        except Exception:
+            pass
+        if "/web/geek/jobs" not in current_url or "_security_check" in current_url:
+            continue
+        if page_contains_browser_check(driver):
+            continue
+
+        try:
+            ensure_jobs_page(driver, jobs_url)
+            return handle
+        except Exception:
+            continue
+
+    if current_handle:
+        try:
+            driver.switch_to.window(current_handle)
+        except Exception:
+            pass
+
+    ensure_jobs_page(driver, jobs_url)
+    try:
+        return driver.current_window_handle
+    except Exception as exc:
+        raise RuntimeError("Could not determine the Boss jobs tab.") from exc
+
+
+def open_jobs_tab(driver, jobs_url: str, pacing: ExecutionPacing) -> str:
+    existing_handles = set(driver.window_handles)
+    driver.execute_script("window.open(arguments[0], '_blank');", normalize_jobs_url(jobs_url))
+    new_handle = wait_for_new_window(driver, existing_handles, timeout=12.0)
+    driver.switch_to.window(new_handle)
+    pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
+    ensure_jobs_page(driver, jobs_url)
+    return new_handle
+
+
+def close_handles(driver, handles_to_close: set[str], fallback_handle: str) -> None:
+    remaining = set(driver.window_handles)
+    for handle in list(handles_to_close):
+        if handle not in remaining:
+            continue
+        try:
+            driver.switch_to.window(handle)
+            driver.close()
+        except Exception:
+            continue
+        remaining = set(driver.window_handles)
+
+    if fallback_handle in remaining:
+        driver.switch_to.window(fallback_handle)
+        return
+    if remaining:
+        driver.switch_to.window(next(iter(remaining)))
 
 
 def ensure_jobs_page(driver, jobs_url: str) -> None:
@@ -703,6 +805,7 @@ def handle_task(
     task: dict[str, Any],
     jobs_url: str,
     send_mode: str,
+    pacing: ExecutionPacing,
     idle_rounds: int,
     scroll_pause: float,
     scroll_timeout: float,
@@ -713,6 +816,7 @@ def handle_task(
 
     try:
         ensure_jobs_page(driver, jobs_url)
+        pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
         index = find_card_index_for_task(
             driver,
             task=task,
@@ -730,6 +834,7 @@ def handle_task(
                 timestamp=time.time(),
             )
 
+        pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
         open_job_detail(
             driver,
             index,
@@ -737,14 +842,17 @@ def handle_task(
             expected_company=company_name,
             expected_url=target_url,
         )
+        pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
         open_chat_from_detail(driver)
         chat_input = find_chat_input(driver)
         before_messages = collect_message_item_texts(driver)
+        pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
         write_chat_message(driver, chat_input, str(task.get("final_greeting_text", "")).strip())
 
         if send_mode == "send":
+            pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
             send_chat_message(driver, chat_input)
-            time.sleep(1.0)
+            pause_for_human(pacing.action_pause_min, pacing.action_pause_max)
             status = "sent"
             note = "Greeting sent from the web chat page."
         elif send_mode == "confirm":
@@ -765,14 +873,18 @@ def handle_task(
             send_mode=send_mode,
             status=status,
             note=note,
-            timestamp=time.time(),
-        )
+                timestamp=time.time(),
+            )
     except Exception as exc:
+        message = str(exc)
+        status = "failed"
+        if "browser-check" in message or "_security_check" in message:
+            status = "blocked_by_browser_check"
         return ExecutionResult(
             job_url=target_url,
             company_name=company_name,
             send_mode=send_mode,
-            status="failed",
+            status=status,
             note=f"{type(exc).__name__}: {exc!r}",
             timestamp=time.time(),
         )
@@ -789,10 +901,15 @@ def main() -> None:
     parser.add_argument("--job-url", default="", help="Only execute the task that matches this normalized job URL.")
     parser.add_argument("--max-tasks", type=int, default=0, help="Maximum number of tasks to execute. Defaults to all matching tasks.")
     parser.add_argument("--send-mode", choices=["draft", "confirm", "send"], default="draft", help="draft fills one chat box and stops; confirm waits for you to send manually in the browser and then advances; send actually sends the greeting.")
+    parser.add_argument("--navigation-mode", choices=["preserve_jobs_tab", "back"], default="preserve_jobs_tab", help="preserve_jobs_tab keeps one Boss list tab untouched and runs each outreach in a temporary tab; back reuses a single tab and returns to the list after each task.")
     parser.add_argument("--idle-rounds", type=int, default=3, help="Stop card lookup after this many scroll rounds without new jobs.")
     parser.add_argument("--scroll-pause", type=float, default=1.2, help="Seconds to wait between scroll checks while locating a target job card.")
     parser.add_argument("--scroll-timeout", type=float, default=8.0, help="Maximum seconds to wait for newly loaded jobs after each bottom scroll.")
     parser.add_argument("--confirm-timeout", type=float, default=0.0, help="Optional timeout in seconds while waiting for manual browser confirmation. Use 0 to wait indefinitely.")
+    parser.add_argument("--action-pause-min", type=float, default=0.9, help="Minimum seconds to pause between page actions so the flow behaves more like a human.")
+    parser.add_argument("--action-pause-max", type=float, default=1.8, help="Maximum seconds to pause between page actions so the flow behaves more like a human.")
+    parser.add_argument("--between-task-pause-min", type=float, default=6.0, help="Minimum cooldown between completed tasks in confirm/send mode.")
+    parser.add_argument("--between-task-pause-max", type=float, default=12.0, help="Maximum cooldown between completed tasks in confirm/send mode.")
     parser.add_argument("--output", default="job-apply-assistant/output/delivery-execution.json", help="Path to the execution report JSON.")
     args = parser.parse_args()
 
@@ -818,26 +935,63 @@ def main() -> None:
         if not current_jobs_url:
             current_jobs_url = driver.current_url if "/web/geek/jobs" in driver.current_url else "https://www.zhipin.com/web/geek/jobs"
         current_jobs_url = normalize_jobs_url(current_jobs_url)
+        pacing = ExecutionPacing(
+            action_pause_min=args.action_pause_min,
+            action_pause_max=args.action_pause_max,
+            between_task_pause_min=args.between_task_pause_min,
+            between_task_pause_max=args.between_task_pause_max,
+        )
+        jobs_handle = acquire_jobs_handle(driver, current_jobs_url)
 
         results: list[ExecutionResult] = []
         for index, task in enumerate(tasks):
-            result = handle_task(
-                driver,
-                task=task,
-                jobs_url=current_jobs_url,
-                send_mode=args.send_mode,
-                idle_rounds=args.idle_rounds,
-                scroll_pause=args.scroll_pause,
-                scroll_timeout=args.scroll_timeout,
-                confirm_timeout=args.confirm_timeout,
-            )
+            base_handles = set(driver.window_handles)
+            try:
+                if args.navigation_mode == "preserve_jobs_tab" and args.send_mode != "draft":
+                    driver.switch_to.window(jobs_handle)
+                    open_jobs_tab(driver, current_jobs_url, pacing=pacing)
+                else:
+                    driver.switch_to.window(jobs_handle)
+                    ensure_jobs_page(driver, current_jobs_url)
+
+                result = handle_task(
+                    driver,
+                    task=task,
+                    jobs_url=current_jobs_url,
+                    send_mode=args.send_mode,
+                    pacing=pacing,
+                    idle_rounds=args.idle_rounds,
+                    scroll_pause=args.scroll_pause,
+                    scroll_timeout=args.scroll_timeout,
+                    confirm_timeout=args.confirm_timeout,
+                )
+            except Exception as exc:
+                message = str(exc)
+                status = "failed"
+                if "browser-check" in message or "_security_check" in message:
+                    status = "blocked_by_browser_check"
+                result = ExecutionResult(
+                    job_url=normalize_job_url(str(task.get("job_url", ""))),
+                    company_name=str(task.get("company_name", "")),
+                    send_mode=args.send_mode,
+                    status=status,
+                    note=f"{type(exc).__name__}: {exc!r}",
+                    timestamp=time.time(),
+                )
             results.append(result)
             print(f"[{index + 1}/{len(tasks)}] {result.company_name or result.job_url} -> {result.status}")
             if args.send_mode == "draft":
                 break
-            if result.status in {"confirm_timeout", "failed"}:
+            if result.status in {"confirm_timeout", "failed", "blocked_by_browser_check"}:
                 break
-            return_to_jobs_page(driver, current_jobs_url)
+
+            pause_for_human(pacing.between_task_pause_min, pacing.between_task_pause_max)
+            if args.navigation_mode == "preserve_jobs_tab":
+                close_handles(driver, set(driver.window_handles) - base_handles, jobs_handle)
+                driver.switch_to.window(jobs_handle)
+                ensure_jobs_page(driver, current_jobs_url)
+            else:
+                return_to_jobs_page(driver, current_jobs_url)
 
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
